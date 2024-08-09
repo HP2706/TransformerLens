@@ -629,7 +629,10 @@ class HookedRootModule(nn.Module):
 
         def _names_filter(name: str) -> bool:
             # we filter out the hook if it is already specified by the user
-            return names_filter(name) and name not in fwd_save_hooks.keys() | bwd_save_hooks.keys()
+            return (
+                names_filter(name)
+                and name not in dict(fwd_save_hooks).keys() | dict(bwd_save_hooks).keys()
+            )
 
         self.is_caching = True
 
@@ -637,7 +640,6 @@ class HookedRootModule(nn.Module):
             # for attention heads the pos dimension is the third from last
             if hook.name is None:
                 raise RuntimeError("Hook should have been provided a name")
-
             hook_name = hook.name
             if is_backward:
                 hook_name += "_grad"
@@ -672,7 +674,15 @@ class HookedRootModule(nn.Module):
                 if incl_bwd:
                     bwd_hooks.append((name, partial(save_hook, is_backward=True)))
 
-        # add user caching hooks
+
+        # we need to give a reference to the cache to the save_hook function
+        fwd_save_hooks = [
+            (name, partial(hook_fn, cache=cache)) for name, hook_fn in fwd_save_hooks
+        ]
+        bwd_save_hooks = [
+            (name, partial(hook_fn, cache=cache)) for name, hook_fn in bwd_save_hooks
+        ]
+        
         fwd_hooks.extend(fwd_save_hooks)
         bwd_hooks.extend(bwd_save_hooks)
         return cache, fwd_hooks, bwd_hooks
