@@ -51,8 +51,7 @@ NamesFilter = Optional[Union[Callable[[str], bool], Sequence[str], str]]
 class _HookFunctionProtocol(Protocol):
     """Protocol for hook functions."""
 
-    def __call__(self, tensor: torch.Tensor, *, hook: "HookPoint") -> Union[Any, None]:
-        ...
+    def __call__(self, tensor: torch.Tensor, *, hook: "HookPoint") -> Union[Any, None]: ...
 
 
 HookFunction = _HookFunctionProtocol  # Callable[..., _HookFunctionProtocol]
@@ -510,6 +509,8 @@ class HookedRootModule(nn.Module):
         self,
         *model_args: Any,
         names_filter: NamesFilter = None,
+        fwd_save_hooks: List[Tuple[str, Callable]] = [],
+        bwd_save_hooks: List[Tuple[str, Callable]] = [],
         device: DeviceType = None,
         remove_batch_dim: bool = False,
         incl_bwd: bool = False,
@@ -526,6 +527,10 @@ class HookedRootModule(nn.Module):
             names_filter (NamesFilter, optional): A filter for which activations to cache. Accepts None, str,
                 list of str, or a function that takes a string and returns a bool. Defaults to None, which
                 means cache everything.
+            fwd_save_hooks: List[Tuple[str, Callable]] = [] : user specified save hooks for forward
+                pass. Note fwd_hooks will override hooks with the same name.
+            bwd_save_hooks: List[Tuple[str, Callable]] = [] : user specified save hooks for backward
+                pass. Note bwd_hooks will override hooks with the same name.
             device (str or torch.Device, optional): The device to cache activations on. Defaults to the
                 model device. WARNING: Setting a different device than the one used by the model leads to
                 significant performance degradation.
@@ -549,8 +554,11 @@ class HookedRootModule(nn.Module):
 
         pos_slice = Slice.unwrap(pos_slice)
 
+        # if the user didnt specify any hooks, we default to cache via save_hook
         cache_dict, fwd, bwd = self.get_caching_hooks(
             names_filter,
+            fwd_save_hooks,
+            bwd_save_hooks,
             incl_bwd,
             device,
             remove_batch_dim=remove_batch_dim,
@@ -572,6 +580,8 @@ class HookedRootModule(nn.Module):
     def get_caching_hooks(
         self,
         names_filter: NamesFilter = None,
+        fwd_save_hooks: List[Tuple[str, Callable]] = [],
+        bwd_save_hooks: List[Tuple[str, Callable]] = [],
         incl_bwd: bool = False,
         device: DeviceType = None,
         remove_batch_dim: bool = False,
@@ -581,7 +591,13 @@ class HookedRootModule(nn.Module):
         """Creates hooks to cache activations. Note: It does not add the hooks to the model.
 
         Args:
-            names_filter (NamesFilter, optional): Which activations to cache. Can be a list of strings (hook names) or a filter function mapping hook names to booleans. Defaults to lambda name: True.
+            names_filter (NamesFilter, optional): Which activations to cache. Can be a list of
+            strings (hook names) or a filter function mapping hook names to booleans. Defaults to
+            lambda name: True.
+            fwd_save_hooks (List[Tuple[str, Callable]]): custom forward save hooks.
+            If a hook is provided here, that hook will not be a save_hook.
+            bwd_save_hooks (List[Tuple[str, Callable]]): custom backward save hooks.
+            If a hook is provided here, that hook will not be a save_hook.
             incl_bwd (bool, optional): Whether to also do backwards hooks. Defaults to False.
             device (_type_, optional): The device to store on. Keeps on the same device as the layer if None.
             remove_batch_dim (bool, optional): Whether to remove the batch dimension (only works for batch_size==1). Defaults to False.
@@ -610,6 +626,10 @@ class HookedRootModule(nn.Module):
         else:
             raise ValueError("names_filter must be a string, list of strings, or function")
         assert callable(names_filter)  # Callable[[str], bool]
+
+        def _names_filter(name: str) -> bool:
+            # we filter out the hook if it is already specified by the user
+            return names_filter(name) and name not in fwd_save_hooks.keys() | bwd_save_hooks.keys()
 
         self.is_caching = True
 
@@ -647,11 +667,14 @@ class HookedRootModule(nn.Module):
         fwd_hooks = []
         bwd_hooks = []
         for name, _ in self.hook_dict.items():
-            if names_filter(name):
+            if _names_filter(name):
                 fwd_hooks.append((name, partial(save_hook, is_backward=False)))
                 if incl_bwd:
                     bwd_hooks.append((name, partial(save_hook, is_backward=True)))
 
+        # add user caching hooks
+        fwd_hooks.extend(fwd_save_hooks)
+        bwd_hooks.extend(bwd_save_hooks)
         return cache, fwd_hooks, bwd_hooks
 
     def cache_all(
